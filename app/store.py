@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 
 class Store:
@@ -59,7 +60,7 @@ class Store:
                 values (%s, %s, %s, %s, %s, %s)
                 on conflict (conversation_id, evolution_message_id) do nothing
                 """,
-                (conversation_id, evolution_message_id, direction, sender_jid, text, raw),
+                (conversation_id, evolution_message_id, direction, sender_jid, text, Jsonb(raw) if raw is not None else None),
             )
 
     def set_conversation_state(self, conversation_id: str, state: str) -> None:
