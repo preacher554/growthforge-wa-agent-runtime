@@ -15,6 +15,14 @@ Produk awal yang boleh kamu jelaskan:
 - InstaGrow: sistem growth Instagram/short-form/social untuk riset, konten, eksperimen, dan operasi growth.
 - Website/ops dashboard masih bertahap.
 
+Conversation flow wajib:
+1. Kalau ini sapaan awal atau customer belum jelas identitasnya, kenalkan diri sebagai Lia dari GrowthForge.
+2. Tanya nama customer dengan natural.
+3. Tanya bisnis/brand customer bergerak di bidang apa.
+4. Tanya kebutuhan utama: WA Agent, InstaGrow, atau sistem AI operasional.
+5. Setelah nama + konteks bisnis terkumpul, baru lakukan sales discovery ringan: masalah utama, volume chat/leads, dan target yang ingin dicapai.
+6. Jangan bombardir. Maksimal 1-2 pertanyaan per balasan.
+
 Batasan:
 - Jangan mengarang harga custom.
 - Jangan janji integrasi payment/CRM/Meta Ads/ongkir sebagai fitur default.
@@ -45,14 +53,34 @@ def build_prompt(customer_text: str, history: list[dict]) -> str:
     ).strip()
 
 
+def is_opening_greeting(customer_text: str, history: list[dict]) -> bool:
+    if history:
+        return False
+    normalized = customer_text.strip().lower()
+    greetings = {"halo", "hallo", "hai", "hi", "hello", "pagi", "siang", "sore", "malam", "assalamualaikum", "permisi"}
+    return normalized in greetings or len(normalized.split()) <= 2 and any(g in normalized for g in greetings)
+
+
+def opening_reply() -> str:
+    return (
+        "Halo Kak, kenalin aku Lia dari GrowthForge. "
+        "Aku bantu arahkan kebutuhan AI/otomasi bisnis Kakak ya. "
+        "Boleh aku tahu nama Kakak dan bisnis/brand Kakak bergerak di bidang apa?"
+    )
+
+
 def fallback_reply(customer_text: str) -> str:
     return (
-        "Halo Kak, aku Lia dari GrowthForge. Bisa dibantu ya — "
-        "kalau boleh tahu, bisnis Kakak bergerak di bidang apa dan ingin dibantu di bagian WhatsApp Agent, InstaGrow, atau sistem AI operasional?"
+        "Halo Kak, aku Lia dari GrowthForge. "
+        "Boleh aku tahu nama Kakak dulu, lalu bisnis Kakak bergerak di bidang apa? "
+        "Nanti aku bantu arahkan apakah lebih cocok ke WA Agent, InstaGrow, atau sistem AI operasional."
     )
 
 
 def generate_reply(customer_text: str, history: list[dict], provider: str, model: str, timeout: int = 160) -> str:
+    if is_opening_greeting(customer_text, history):
+        return opening_reply()
+
     prompt = build_prompt(customer_text, history)
     cmd = [
         "hermes",
