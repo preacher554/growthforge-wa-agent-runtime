@@ -65,11 +65,15 @@ async def evolution_webhook(request: Request):
 
     decision = classify_handoff(incoming.text)
     if decision.should_handoff:
-        reply = "Baik Kak, untuk bagian itu aku bantu teruskan ke tim GrowthForge ya supaya jawabannya lebih tepat. Mohon tunggu sebentar."
+        reply = f"Baik Kak, permintaan kamu akan diteruskan ke tim GrowthForge. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
         store.create_handoff(conversation["id"], decision.reason, incoming.text)
         store.set_conversation_state(conversation["id"], "waiting_human")
-        await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
-        store.insert_message(conversation["id"], f"lia-handoff-{incoming.message_id}", "outbound", None, reply, {"handoff": decision.reason})
+        try:
+            await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
+            store.insert_message(conversation["id"], f"lia-handoff-{incoming.message_id}", "outbound", None, reply, {"handoff": decision.reason})
+        except Exception as e:
+            import logging
+            logging.getLogger("lia.runtime").error("send_text failed (handoff): %s", e)
         return {"ok": True, "handoff": True}
 
     history = store.get_recent_messages(conversation["id"], limit=8)
@@ -80,8 +84,12 @@ async def evolution_webhook(request: Request):
         model=settings.hermes_model,
         timeout=settings.hermes_timeout_seconds,
     )
-    await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
-    store.insert_message(conversation["id"], f"lia-reply-{incoming.message_id}", "outbound", None, reply, {"provider": settings.hermes_model_provider, "model": settings.hermes_model})
+    try:
+        await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
+        store.insert_message(conversation["id"], f"lia-reply-{incoming.message_id}", "outbound", None, reply, {"provider": settings.hermes_model_provider, "model": settings.hermes_model})
+    except Exception as e:
+        import logging
+        logging.getLogger("lia.runtime").error("send_text failed (reply): %s", e)
     return {"ok": True, "handoff": False}
 
 
