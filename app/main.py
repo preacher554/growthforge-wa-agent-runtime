@@ -43,6 +43,20 @@ async def evolution_webhook(request: Request):
         incoming.raw,
     )
 
+    # Dedupe: skip if we already processed this exact message
+    existing = None
+    if incoming.message_id:
+        with store.connect() as conn:
+            row = conn.execute(
+                "select id from messages where conversation_id = %s and evolution_message_id = %s",
+                (conversation["id"], incoming.message_id),
+            ).fetchone()
+            if row:
+                existing = row["id"]
+
+    if existing:
+        return {"ok": True, "reply": "duplicate_ignored"}
+
     if conversation.get("state") in {"waiting_human", "human_active"}:
         if should_resume_from_admin_command(incoming.text):
             store.set_conversation_state(conversation["id"], "ai_active")
