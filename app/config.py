@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     admin_private_jid: str = ""
 
     hermes_model_provider: str = "openrouter"
-    hermes_model: str = "google/gemma-4-31b-it:free"
+    hermes_model: str = "openai/gpt-oss-120b:free"
     hermes_timeout_seconds: int = 160
 
     model_config = SettingsConfigDict(env_file=(), extra="ignore")
