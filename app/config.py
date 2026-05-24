@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     runtime_port: int = 3300
     admin_private_jid: str = ""
 
-    hermes_model_provider: str = "openai-codex"
-    hermes_model: str = "gpt-5.4-mini"
+    hermes_model_provider: str = "openrouter"
+    hermes_model: str = "z-ai/glm-4.5-air:free"
     hermes_timeout_seconds: int = 160
 
     model_config = SettingsConfigDict(env_file=(), extra="ignore")
