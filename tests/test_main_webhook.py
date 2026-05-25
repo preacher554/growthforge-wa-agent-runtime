@@ -26,6 +26,9 @@ class FakeStore:
     def __init__(self):
         self.message_ids = set()
         self.inserted = []
+        self.handoffs = []
+        self.state_changes = []
+        self.conversation_state = "ai_active"
 
     def connect(self):
         return FakeConn(self)
@@ -34,7 +37,7 @@ class FakeStore:
         return {"id": "tenant-1"}
 
     def upsert_conversation(self, tenant_id, remote_jid, customer_name):
-        return {"id": "conversation-1", "state": "ai_active"}
+        return {"id": "conversation-1", "state": self.conversation_state, "customer_name": customer_name}
 
     def get_recent_messages(self, conversation_id, limit=8):
         return []
@@ -45,10 +48,19 @@ class FakeStore:
             self.message_ids.add(evolution_message_id)
 
     def create_handoff(self, conversation_id, reason, summary=None):
-        raise AssertionError("handoff should not be created")
+        self.handoffs.append({"conversation_id": conversation_id, "reason": reason, "summary": summary})
 
     def set_conversation_state(self, conversation_id, state):
-        raise AssertionError("state should not change")
+        self.state_changes.append({"conversation_id": conversation_id, "state": state})
+
+
+class FakeNotifier:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, text):
+        self.sent.append(text)
+        return {"ok": True}
 
 
 class FakeEvolution:
@@ -65,6 +77,7 @@ def test_webhook_dedupe_checks_before_insert_and_replies(monkeypatch):
     fake_evolution = FakeEvolution()
     monkeypatch.setattr(main, "store", fake_store)
     monkeypatch.setattr(main, "evolution", fake_evolution)
+    monkeypatch.setattr(main, "notifier", FakeNotifier())
     monkeypatch.setattr(main, "generate_reply", lambda *args, **kwargs: "Balasan Lia")
 
     client = TestClient(main.app)
@@ -97,6 +110,7 @@ def test_webhook_duplicate_message_is_ignored(monkeypatch):
     fake_evolution = FakeEvolution()
     monkeypatch.setattr(main, "store", fake_store)
     monkeypatch.setattr(main, "evolution", fake_evolution)
+    monkeypatch.setattr(main, "notifier", FakeNotifier())
     monkeypatch.setattr(main, "generate_reply", lambda *args, **kwargs: "SHOULD_NOT_RUN")
 
     client = TestClient(main.app)
@@ -115,3 +129,36 @@ def test_webhook_duplicate_message_is_ignored(monkeypatch):
     assert response.json() == {"ok": True, "reply": "duplicate_ignored"}
     assert fake_store.inserted == []
     assert fake_evolution.sent == []
+
+
+def test_webhook_handoff_notifies_telegram_operator(monkeypatch):
+    fake_store = FakeStore()
+    fake_evolution = FakeEvolution()
+    fake_notifier = FakeNotifier()
+    monkeypatch.setattr(main, "store", fake_store)
+    monkeypatch.setattr(main, "evolution", fake_evolution)
+    monkeypatch.setattr(main, "notifier", fake_notifier)
+
+    client = TestClient(main.app)
+    payload = {
+        "event": "messages.upsert",
+        "instance": "lia-growthforge",
+        "data": {
+            "key": {"remoteJid": "628111222333@s.whatsapp.net", "fromMe": False, "id": "MSG-HANDOFF"},
+            "pushName": "Supri",
+            "message": {"conversation": "Saya mau harga custom dan meeting"},
+        },
+    }
+
+    response = client.post("/webhook/evolution", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "handoff": True}
+    assert fake_store.handoffs
+    assert fake_store.state_changes == [{"conversation_id": "conversation-1", "state": "waiting_human"}]
+    assert len(fake_notifier.sent) == 1
+    assert "Chief, Lia butuh handoff manusia" in fake_notifier.sent[0]
+    assert "Supri" in fake_notifier.sent[0]
+    assert "628111222333" in fake_notifier.sent[0]
+    assert "Saya mau harga custom dan meeting" in fake_notifier.sent[0]
+    assert fake_evolution.sent

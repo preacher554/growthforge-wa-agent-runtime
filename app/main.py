@@ -7,6 +7,7 @@ from app.brain import generate_reply
 from app.config import load_settings
 from app.evolution import extract_message
 from app.evolution_client import EvolutionClient
+from app.notifier import TelegramNotifier, build_handoff_notification
 from app.policy import classify_handoff, should_resume_from_admin_command
 from app.store import Store
 
@@ -14,6 +15,7 @@ settings = load_settings()
 app = FastAPI(title="GrowthForge Lia Runtime", version="0.1.0")
 store = Store(settings.database_url)
 evolution = EvolutionClient(settings.evolution_base_url, settings.authentication_api_key)
+notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
 
 @app.get("/health")
@@ -71,6 +73,19 @@ async def evolution_webhook(request: Request):
         reply = f"Baik Kak, permintaan kamu akan diteruskan ke tim GrowthForge. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
         store.create_handoff(conversation["id"], decision.reason, incoming.text)
         store.set_conversation_state(conversation["id"], "waiting_human")
+        try:
+            notification = build_handoff_notification(
+                customer_text=incoming.text,
+                history=history,
+                conversation=conversation,
+                remote_jid=incoming.remote_jid,
+                push_name=incoming.push_name,
+                reason=decision.reason,
+            )
+            await notifier.send(notification)
+        except Exception as e:
+            import logging
+            logging.getLogger("lia.runtime").error("telegram handoff notification failed: %s", e)
         try:
             await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
             store.insert_message(conversation["id"], f"lia-handoff-{incoming.message_id}", "outbound", None, reply, {"handoff": decision.reason})

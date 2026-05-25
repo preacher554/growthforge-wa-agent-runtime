@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     runtime_host: str = "0.0.0.0"
     runtime_port: int = 3300
     admin_private_jid: str = ""
+    telegram_bot_token: str = ""
+    telegram_admin_chat_id: str = ""
 
     hermes_model_provider: str = "openai-codex"
     hermes_model: str = "gpt-5.2"
@@ -39,7 +41,10 @@ def load_dotenv_file(path: str) -> None:
 
 
 def load_settings() -> Settings:
+    load_dotenv_file("/root/.hermes/.env")
     load_dotenv_file("/root/services/evolution-growthforge/.env")
     load_dotenv_file("/root/services/evolution-growthforge/supabase.env")
     os.environ.setdefault("EVOLUTION_BASE_URL", "http://127.0.0.1:8080")
+    if os.getenv("TELEGRAM_HOME_CHANNEL"):
+        os.environ.setdefault("TELEGRAM_ADMIN_CHAT_ID", os.environ["TELEGRAM_HOME_CHANNEL"])
     return Settings()
