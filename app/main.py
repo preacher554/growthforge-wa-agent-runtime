@@ -34,16 +34,9 @@ async def evolution_webhook(request: Request):
 
     tenant = store.get_tenant_by_instance(incoming.instance_name or settings.evolution_instance)
     conversation = store.upsert_conversation(tenant["id"], incoming.remote_jid, incoming.push_name)
-    store.insert_message(
-        conversation["id"],
-        incoming.message_id or None,
-        "inbound",
-        incoming.remote_jid,
-        incoming.text,
-        incoming.raw,
-    )
 
-    # Dedupe: skip if we already processed this exact message
+    # Dedupe must run before inserting the inbound message. Otherwise every new
+    # message is immediately found again and incorrectly ignored.
     existing = None
     if incoming.message_id:
         with store.connect() as conn:
@@ -56,6 +49,16 @@ async def evolution_webhook(request: Request):
 
     if existing:
         return {"ok": True, "reply": "duplicate_ignored"}
+
+    history = store.get_recent_messages(conversation["id"], limit=8)
+    store.insert_message(
+        conversation["id"],
+        incoming.message_id or None,
+        "inbound",
+        incoming.remote_jid,
+        incoming.text,
+        incoming.raw,
+    )
 
     if conversation.get("state") in {"waiting_human", "human_active"}:
         if should_resume_from_admin_command(incoming.text):
@@ -76,7 +79,6 @@ async def evolution_webhook(request: Request):
             logging.getLogger("lia.runtime").error("send_text failed (handoff): %s", e)
         return {"ok": True, "handoff": True}
 
-    history = store.get_recent_messages(conversation["id"], limit=8)
     reply = generate_reply(
         incoming.text,
         history,

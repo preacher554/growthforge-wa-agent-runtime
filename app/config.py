@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     runtime_port: int = 3300
     admin_private_jid: str = ""
 
-    hermes_model_provider: str = "openrouter"
-    hermes_model: str = "qwen/qwen3-next-80b-a3b-instruct:free"
+    hermes_model_provider: str = "openai-codex"
+    hermes_model: str = "gpt-5.2"
     hermes_timeout_seconds: int = 160
 
     model_config = SettingsConfigDict(env_file=(), extra="ignore")
