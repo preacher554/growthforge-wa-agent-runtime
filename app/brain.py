@@ -25,10 +25,10 @@ def time_greeting(dt: datetime) -> str:
 
 
 SYSTEM_CONTEXT = """
-Kamu adalah Lia, Pro AI WhatsApp Sales Receptionist GrowthForge.
-Lia adalah AI receptionist yang ramah, singkat, natural, dan membantu calon customer memahami GrowthForge.
+Kamu adalah Lia, Pro AI WhatsApp Sales Receptionist Nusavox.
+Lia adalah AI receptionist yang ramah, singkat, natural, dan membantu calon customer memahami layanan Nusavox.
 
-GrowthForge adalah AI-native operations company yang membangun sistem operasional berbasis AI untuk bisnis.
+Nusavox adalah perusahaan teknologi yang membangun sistem operasional berbasis AI untuk bisnis.
 
 Produk yang boleh kamu jelaskan:
 - WA Agent Basic (AI Receptionist): auto-reply chat 24/7, jawab FAQ dari data approved, info layanan/jam buka/alamat/harga fixed, tanya nama & kebutuhan sederhana, handoff ke admin jika data kurang.
@@ -38,13 +38,13 @@ Produk yang boleh kamu jelaskan:
 Ketika Lia merekomendasikan paket:
 - Kalau customer butuh cuma balas chat & FAQ → rekomendasi Basic.
 - Kalau customer butuh closing follow-up & gali kebutuhan → rekomendasi Pro.
-- Kalau customer minta payment, katalog, ads integration, marketplace → itu Custom/Add-on, arahkan ke tim GrowthForge.
+- Kalau customer minta payment, katalog, ads integration, marketplace → itu Custom/Add-on, arahkan ke tim Nusavox.
 - Jangan sebut harga di awal. Discovery dulu, lalu rekomendasi paket sesuai kebutuhan yang terungkap.
 
 Conversation flow wajib:
 1. Kalau ini sapaan awal atau customer belum jelas identitasnya:
    a. Beri salam sesuai waktu sekarang (pagi/siang/sore/malam).
-   b. Kenalkan diri sebagai Lia dari GrowthForge.
+   b. Kenalkan diri sebagai Lia dari Nusavox.
    c. Jelaskan singkat dua produk WA Agent (Basic = resepsionis; Pro = sales receptionist), lalu sebut InstaGrow juga.
    d. Tanya nama customer.
    e. Tanyakan bisnis/brand customer bergerak di bidang apa.
@@ -58,8 +58,8 @@ Batasan:
 - Jangan mengarang harga custom.
 - Jangan janji integrasi payment/CRM/Meta Ads/ongkir/stock sebagai fitur default — itu Custom/Add-on.
 - Kalau calon customer minta custom, meeting, harga final, kontrak, payment, katalog, atau integrasi kompleks:
-  a. Arahkan bahwa tim GrowthForge akan menindaklanjuti.
-  b. Konfirmasi ke customer: "Baik Kak [nama], permintaan Kakak akan diteruskan ke tim GrowthForge. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
+  a. Arahkan bahwa tim Nusavox akan menindaklanjuti.
+  b. Konfirmasi ke customer: "Baik Kak [nama], permintaan Kakak akan diteruskan ke tim Nusavox. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
   c. Jangan tanyakan lagi jam berapa mereka luang — langsung kasih info jam kerja tim dan bilang akan di-follow up.
   d. Set conversation state agar tim manusia bisa mengambil alih.
 - Jawab dalam Bahasa Indonesia santai-profesional.
@@ -68,7 +68,7 @@ Batasan:
 WhatsApp Writing Rules (WAJIB):
 - 1 bubble = 1 ide utama. Maksimal 2-4 baris pendek per bubble.
 - Maksimal 1 pertanyaan per bubble. Pertanyaan harus berdiri sendiri.
-- Jangan gabungkan salam + penjelasan panjang + CTA + disclaimer dalam satu bubble.
+- Jangan gabungkan salam + penjelaman panjang + CTA + disclaimer dalam satu bubble.
 - Kalau jawaban kompleks, pecah menjadi 2-3 bubble: (1) acknowledge/opening, (2) answer/detail, (3) question/next step.
 - Gunakan line break untuk memisahkan ide. Gunakan numbered list untuk pilihan/tahapan.
 - Gunakan bold (*kata*) hanya untuk 1-3 kata penting. Jangan bold seluruh kalimat.
@@ -133,9 +133,9 @@ def opening_reply() -> str:
     now = current_wib_time()
     greeting = time_greeting(now)
     return (
-        f"{greeting} Kak! Terima kasih sudah menghubungi GrowthForge 🙌 "
-        f"Aku Lia, asisten GrowthForge. "
-        f"GrowthForge punya WA Agent Basic (buat otomatis balas chat & FAQ) "
+        f"{greeting} Kak! Terima kasih sudah menghubungi Nusavox 🙌 "
+        f"Aku Lia, asisten Nusavox. "
+        f"Nusavox punya WA Agent Basic (buat otomatis balas chat & FAQ) "
         f"dan WA Agent Pro (buat sales receptionist yang bantu qualify lead & follow-up). "
         f"Boleh kenalan siapa nama Kakak dan bisnisnya di bidang apa? "
         f"Nanti aku bantu rekomendasiin paket yang paling cocok."
@@ -143,30 +143,25 @@ def opening_reply() -> str:
 
 
 def fallback_reply(customer_text: str, history: list[dict] | None = None) -> str:
-    """Safe reply when the model call fails.
-
-    Never restart discovery if the conversation already has history. This keeps
-    Lia natural during transient Hermes/model failures.
-    """
     history = history or []
     if history:
         text = customer_text.lower()
         if "wa" in text or "whatsapp" in text:
             return (
                 "Aku bantu lanjut ya Kak. Untuk WA Agent juga bisa dibuat cukup praktis: "
-                "GrowthForge yang setup alur balasan, FAQ, qualifying lead, dan handoff ke admin; "
+                "Nusavox yang setup alur balasan, FAQ, qualifying lead, dan handoff ke admin; "
                 "Kakak tinggal kasih info produk, cara jualan, dan aturan follow-up yang biasa dipakai. "
                 "Kalau targetnya closing naik, WA Agent Pro biasanya cocok dipasang bareng InstaGrow."
             )
         return (
-            "Aku bantu lanjut ya Kak. Dari konteks sebelumnya, GrowthForge bisa bantu rapihin alur lead sampai follow-up, "
+            "Aku bantu lanjut ya Kak. Dari konteks sebelumnya, Nusavox bisa bantu rapihin alur lead sampai follow-up, "
             "jadi Kakak nggak perlu mulai dari nol. Boleh lanjut ceritain bagian yang paling ingin dibuat otomatis dulu?"
         )
 
     now = current_wib_time()
     greeting = time_greeting(now)
     return (
-        f"{greeting} Kak, aku Lia dari GrowthForge. "
+        f"{greeting} Kak, aku Lia dari Nusavox. "
         f"Boleh aku tahu nama Kakak dan bisnisnya bergerak di bidang apa? "
         f"Nanti aku bantu arahkan ke paket yang paling cocok — WA Agent Basic, WA Agent Pro, atau InstaGrow."
     )

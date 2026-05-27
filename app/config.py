@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_admin_chat_id: str = ""
 
+    wa_agents_enabled: bool = False
+
     hermes_model_provider: str = "openai-codex"
     hermes_model: str = "gpt-5.2"
     hermes_timeout_seconds: int = 160

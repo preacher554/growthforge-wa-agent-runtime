@@ -42,7 +42,7 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                select direction, text, created_at
+                select direction, text, raw, created_at
                 from messages
                 where conversation_id = %s
                 order by created_at desc
@@ -51,6 +51,46 @@ class Store:
                 (conversation_id, limit),
             ).fetchall()
             return [dict(r) for r in reversed(rows)]
+
+    def message_exists(self, conversation_id: str, evolution_message_id: str | None) -> bool:
+        if not evolution_message_id:
+            return False
+        with self.connect() as conn:
+            row = conn.execute(
+                "select id from messages where conversation_id = %s and evolution_message_id = %s",
+                (conversation_id, evolution_message_id),
+            ).fetchone()
+            return bool(row)
+
+    def get_last_human_outbound_at(self, conversation_id: str):
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select created_at
+                from messages
+                where conversation_id = %s
+                  and direction = 'outbound'
+                  and raw #>> '{key,fromMe}' = 'true'
+                order by created_at desc
+                limit 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            return row["created_at"] if row else None
+
+    def get_last_handoff_at(self, conversation_id: str):
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select created_at
+                from handoff_events
+                where conversation_id = %s
+                order by created_at desc
+                limit 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            return row["created_at"] if row else None
 
     def insert_message(self, conversation_id: str, evolution_message_id: str | None, direction: str, sender_jid: str | None, text: str, raw: dict | None = None) -> None:
         with self.connect() as conn:

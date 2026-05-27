@@ -5,7 +5,7 @@ Runtime backend for Lia, GrowthForge's WhatsApp AI frontdesk.
 ## Local run
 
 ```bash
-cd /root/repos/growthforge-wa-agent-runtime
+cd /root/repos/whatsapp-agent-architect-runtime
 . .venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 3300
 ```

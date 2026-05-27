@@ -63,6 +63,6 @@ def build_handoff_notification(
         f"Reason: {reason}\n\n"
         "Ringkasan chat terakhir:\n"
         f"{transcript}\n\n"
-        "Aksi yang disarankan: follow-up dari nomor GrowthForge yang sama. "
+        "Aksi yang disarankan: follow-up dari nomor Nusavox yang sama. "
         "Lia sudah pause auto-reply untuk customer ini."
     )

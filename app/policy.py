@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -32,7 +33,7 @@ RESUME_COMMANDS = {"/resume", "/lanjut", "/release", "/ai"}
 def classify_handoff(text: str) -> HandoffDecision:
     lowered = text.lower()
     for keyword in HANDOFF_KEYWORDS:
-        if keyword in lowered:
+        if re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", lowered):
             return HandoffDecision(True, f"Customer asked about {keyword}; human admin should review.")
     return HandoffDecision(False, "")
 

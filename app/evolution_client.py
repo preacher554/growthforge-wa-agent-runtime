@@ -19,3 +19,18 @@ class EvolutionClient:
             )
             resp.raise_for_status()
             return resp.json()
+
+    async def mark_message_as_read(self, instance: str, remote_jid: str, message_id: str) -> dict:
+        payload = {
+            "readMessages": [
+                {"remoteJid": remote_jid, "fromMe": False, "id": message_id}
+            ]
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{self.base_url}/chat/markMessageAsRead/{instance}",
+                headers={"apikey": self.api_key},
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()

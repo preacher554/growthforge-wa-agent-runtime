@@ -14,6 +14,12 @@ def test_classify_no_handoff_for_basic_intro_question():
     assert result.should_handoff is False
 
 
+def test_classify_no_handoff_for_customer_word():
+    result = classify_handoff("Sementara ini chat perhari cuma 1-2 customer")
+
+    assert result.should_handoff is False
+
+
 def test_resume_command_detection():
     assert should_resume_from_admin_command("/resume") is True
     assert should_resume_from_admin_command("/lanjut") is True
