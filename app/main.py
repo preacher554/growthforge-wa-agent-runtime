@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request
@@ -24,17 +22,11 @@ evolution = EvolutionClient(settings.evolution_base_url, settings.authentication
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
 HUMAN_RESUME_WINDOW = timedelta(hours=1)
-_BUFFER_SECONDS = 4
-_DEDUP_TTL = 30  # seconds — ignore same content from same JID within this window
-
-# Per-JID message buffer
-_buf: dict[str, list[tuple[str, str, datetime]]] = defaultdict(list)
-_tasks: dict[str, asyncio.Task] = {}
-# Per-JID lock to prevent parallel processing
-_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-# Content-based dedup: key = hash(jid + text), value = timestamp
-_seen_content: dict[str, datetime] = {}
 _log = logging.getLogger("aulia.runtime")
+
+# Simple dedup: store last message_id per JID (in-memory)
+_seen_ids: dict[str, str] = {}
+
 
 @app.on_event("startup")
 async def startup():
@@ -53,27 +45,6 @@ async def _send_reply(instance_name: str, remote_jid: str, reply: str) -> None:
         _log.exception("send_reply failed")
 
 
-async def _process_buffer(jid: str, trigger) -> None:
-    """Wait for buffer window then process combined messages."""
-    try:
-        await asyncio.sleep(_BUFFER_SECONDS)
-        batch = _buf.pop(jid, [])
-        _tasks.pop(jid, None)
-        if not batch:
-            return
-        combined = " ".join(t for _, t, _ in sorted(batch, key=lambda x: x[2]))
-        first_id = batch[0][0]
-        _log.info("Processing buffered msg: %s (from %d bubbles)", combined[:80], len(batch))
-
-        # Per-JID lock: only one processing task per user at a time
-        async with _locks[jid]:
-            await _handle_incoming(combined, first_id, trigger)
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        _log.exception("process_buffer error")
-
-
 async def _handle_incoming(text: str, message_id: str, trigger) -> None:
     remote_jid = trigger.remote_jid  # type: ignore[attr-defined]
     instance_name = trigger.instance_name or settings.evolution_instance  # type: ignore[attr-defined]
@@ -86,6 +57,7 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
         _log.info("Duplicate message ignored: %s", message_id)
         return
 
+    history = store.get_recent_messages(conversation["id"], limit=8)
     store.insert_message(conversation["id"], message_id, "inbound", remote_jid, text, None)
 
     # Resume logic
@@ -110,7 +82,6 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
     if decision.should_handoff:
         reply = "Baik Kak, permintaan kamu akan diteruskan ke tim NusaAI. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
         store.create_handoff(conversation["id"], decision.reason, text)
-        store.set_conversation_state(conversation["id"], "waiting_human")
         try:
             notif = build_handoff_notification(
                 customer_text=text, history=history, conversation=conversation,
@@ -124,7 +95,7 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
         return
 
     # Dedup: already replied recently
-    if has_recent_reply(history, seconds=_BUFFER_SECONDS):
+    if has_recent_reply(history, seconds=10):
         _log.info("Already replied recently, skipping")
         return
 
@@ -145,45 +116,23 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
 @app.post("/webhook/evolution")
 async def webhook(request: Request):
     payload = await request.json()
-    event = str(payload.get("event") or "")
-    event_l = event.lower()
-    if event and "message" not in event_l and "send" not in event_l:
-        return {"ok": True, "ignored": event}
-
-    if not settings.wa_agents_enabled:
-        return {"ok": True, "ignored": "wa_agents_disabled"}
 
     incoming = extract_message(payload)
     if not incoming.text.strip() or not incoming.remote_jid.endswith("@s.whatsapp.net"):
         return {"ok": True, "ignored": "not_processable"}
 
+    # Simple dedup by message_id
+    mid = incoming.message_id
     jid = incoming.remote_jid
-    text = incoming.text.strip()
-    now = _now_utc()
+    if _seen_ids.get(jid) == mid:
+        _log.info("Duplicate message_id ignored: %s", mid)
+        return {"ok": True, "ignored": "duplicate"}
+    _seen_ids[jid] = mid
 
-    # Content-based dedup: skip if same text from same JID within TTL window
-    content_key = hashlib.md5(f"{jid}:{text}".encode()).hexdigest()
-    last_seen = _seen_content.get(content_key)
-    if last_seen and (now - last_seen).total_seconds() < _DEDUP_TTL:
-        _log.info("Duplicate content ignored: %s (%.0fs ago)", text[:40], (now - last_seen).total_seconds())
-        return {"ok": True, "ignored": "duplicate_content"}
-    _seen_content[content_key] = now
+    # Process immediately (no buffer)
+    asyncio.create_task(_handle_incoming(incoming.text.strip(), mid, incoming))
 
-    # Cleanup old dedup entries (prevent memory leak)
-    if len(_seen_content) > 1000:
-        cutoff = now - timedelta(seconds=_DEDUP_TTL * 2)
-        _seen_content = {k: v for k, v in _seen_content.items() if v > cutoff}
-
-    _buf[jid].append((incoming.message_id, text, now))
-
-    # Cancel previous timer for this user
-    if jid in _tasks:
-        _tasks[jid].cancel()
-
-    # Schedule delayed processing
-    _tasks[jid] = asyncio.create_task(_process_buffer(jid, incoming))
-
-    return {"ok": True, "buffered": True}
+    return {"ok": True, "queued": True}
 
 
 @app.get("/health")
