@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -22,10 +23,32 @@ evolution = EvolutionClient(settings.evolution_base_url, settings.authentication
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
 HUMAN_RESUME_WINDOW = timedelta(hours=1)
+_OUTBOUND_LEDGER_TTL = 60  # seconds — remember sent messages for dedup
+
 _log = logging.getLogger("aulia.runtime")
 
-# Simple dedup: store last message_id per JID (in-memory)
+# Idempotency: prevent duplicate webhook processing
 _seen_ids: dict[str, str] = {}
+
+# Outbound ledger: track AI-sent messages to detect echo
+# Key: hash(instance + message_id), Value: (text, timestamp)
+_outbound_ledger: dict[str, tuple[str, datetime]] = {}
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _idempotency_key(instance: str, message_id: str) -> str:
+    return hashlib.md5(f"{settings.hermes_model_provider}:{instance}:{message_id}".encode()).hexdigest()
+
+
+def _clean_outbound_ledger():
+    """Remove expired entries to prevent memory leak."""
+    cutoff = _now_utc() - timedelta(seconds=_OUTBOUND_LEDGER_TTL * 2)
+    expired = [k for k, (_, ts) in _outbound_ledger.items() if ts < cutoff]
+    for k in expired:
+        del _outbound_ledger[k]
 
 
 @app.on_event("startup")
@@ -34,18 +57,21 @@ async def startup():
     _log.info("Aulia runtime started")
 
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+async def _send_reply(instance_name: str, remote_jid: str, text: str) -> str:
+    """Send reply via Evolution API. Returns Evolution message_id."""
+    result = await evolution.send_text(instance_name, remote_jid, text)
+    # Extract Evolution message_id from response
+    msg_id = ""
+    if isinstance(result, dict):
+        key_data = result.get("key") or result.get("message") or {}
+        if isinstance(key_data, dict):
+            msg_id = key_data.get("id") or ""
+        if not msg_id:
+            msg_id = result.get("messageId") or result.get("id") or ""
+    return str(msg_id)
 
 
-async def _send_reply(instance_name: str, remote_jid: str, reply: str) -> None:
-    try:
-        await evolution.send_text(instance_name, remote_jid, reply)
-    except Exception:
-        _log.exception("send_reply failed")
-
-
-async def _handle_incoming(text: str, message_id: str, trigger) -> None:
+async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = False) -> None:
     remote_jid = trigger.remote_jid  # type: ignore[attr-defined]
     instance_name = trigger.instance_name or settings.evolution_instance  # type: ignore[attr-defined]
     push_name = trigger.push_name  # type: ignore[attr-defined]
@@ -53,12 +79,34 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
     tenant = store.get_tenant_by_instance(instance_name)
     conversation = store.upsert_conversation(tenant["id"], remote_jid, push_name)
 
+    direction = "outbound" if from_me else "inbound"
+
+    # Idempotency check: skip if already processed this message_id
+    idem_key = _idempotency_key(instance_name, message_id)
     if store.message_exists(conversation["id"], message_id):
-        _log.info("Duplicate message ignored: %s", message_id)
+        _log.info("Idempotent skip: %s already in DB (direction=%s)", message_id, direction)
         return
 
     history = store.get_recent_messages(conversation["id"], limit=8)
-    store.insert_message(conversation["id"], message_id, "inbound", remote_jid, text, None)
+
+    # For outbound messages: just record, don't process
+    if from_me:
+        store.insert_message(conversation["id"], message_id, direction, remote_jid, text, {"from_me": True})
+
+        # Check if this matches our outbound ledger (AI echo)
+        ledger_key = _idempotency_key(instance_name, message_id)
+        if ledger_key in _outbound_ledger:
+            _log.info("Outbound echo detected (AI-sent): %s — marked delivered", message_id)
+            del _outbound_ledger[ledger_key]
+            return
+
+        # Not in ledger → human/admin takeover
+        _log.info("Human/admin outbound detected from %s — AI pauses", remote_jid)
+        store.set_conversation_state(conversation["id"], "human_active")
+        return
+
+    # === INBOUND PROCESSING (from_me=False) ===
+    store.insert_message(conversation["id"], message_id, direction, remote_jid, text, None)
 
     # Resume logic
     state = conversation.get("state")
@@ -90,8 +138,12 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
             await notifier.send(notif)
         except Exception:
             _log.exception("handoff notification failed")
-        await _send_reply(instance_name, remote_jid, reply)
+        evo_id = await _send_reply(instance_name, remote_jid, reply)
         store.insert_message(conversation["id"], "handoff-" + message_id, "outbound", None, reply, {"handoff": decision.reason})
+        if evo_id:
+            ledger_key = _idempotency_key(instance_name, evo_id)
+            _outbound_ledger[ledger_key] = (reply, _now_utc())
+            _clean_outbound_ledger()
         return
 
     # Dedup: already replied recently
@@ -108,24 +160,33 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
 
     # Handle multi-bubble reply (opening) or single reply
     if isinstance(reply, list):
-        # Multi-bubble: send each bubble separately
         combined = "\n\n".join(reply)
         _log.info("Multi-bubble reply: %d bubbles", len(reply))
+        last_evo_id = ""
         for i, bubble in enumerate(reply):
-            await _send_reply(instance_name, remote_jid, bubble)
+            evo_id = await _send_reply(instance_name, remote_jid, bubble)
+            if evo_id:
+                last_evo_id = evo_id
+                ledger_key = _idempotency_key(instance_name, evo_id)
+                _outbound_ledger[ledger_key] = (bubble, _now_utc())
             if i < len(reply) - 1:
-                await asyncio.sleep(0.5)  # small delay between bubbles
+                await asyncio.sleep(0.5)
         store.insert_message(
             conversation["id"], "reply-" + message_id, "outbound", None, combined,
             {"provider": settings.hermes_model_provider, "model": settings.hermes_model, "bubbles": len(reply)},
         )
+        _clean_outbound_ledger()
     else:
         _log.info("Reply: %s", reply[:100])
-        await _send_reply(instance_name, remote_jid, reply)
+        evo_id = await _send_reply(instance_name, remote_jid, reply)
         store.insert_message(
             conversation["id"], "reply-" + message_id, "outbound", None, reply,
             {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
         )
+        if evo_id:
+            ledger_key = _idempotency_key(instance_name, evo_id)
+            _outbound_ledger[ledger_key] = (reply, _now_utc())
+            _clean_outbound_ledger()
 
 
 @app.post("/webhook/evolution")
@@ -136,16 +197,23 @@ async def webhook(request: Request):
     if not incoming.text.strip() or not incoming.remote_jid.endswith("@s.whatsapp.net"):
         return {"ok": True, "ignored": "not_processable"}
 
-    # Simple dedup by message_id
-    mid = incoming.message_id
     jid = incoming.remote_jid
+    mid = incoming.message_id
+    instance = incoming.instance_name or settings.evolution_instance
+
+    # Idempotency dedup (in-memory, fast path)
     if _seen_ids.get(jid) == mid:
-        _log.info("Duplicate message_id ignored: %s", mid)
+        _log.info("Duplicate webhook ignored: %s", mid)
         return {"ok": True, "ignored": "duplicate"}
     _seen_ids[jid] = mid
 
-    # Process immediately (no buffer)
-    asyncio.create_task(_handle_incoming(incoming.text.strip(), mid, incoming))
+    # Handle outbound echo (fromMe=True)
+    if incoming.from_me:
+        asyncio.create_task(_handle_incoming(incoming.text.strip(), mid, incoming, from_me=True))
+        return {"ok": True, "handled": "outbound_echo"}
+
+    # Handle real inbound
+    asyncio.create_task(_handle_incoming(incoming.text.strip(), mid, incoming, from_me=False))
 
     return {"ok": True, "queued": True}
 
