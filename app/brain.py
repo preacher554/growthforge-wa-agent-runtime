@@ -43,11 +43,12 @@ Ketika merekomendasikan paket:
 - Minta payment, katalog, integrasi kompleks → Custom/Add-on, arahkan ke tim NusaAI.id.
 - Jangan sebut harga di awal. Discovery dulu, rekomendasi paket sesuai kebutuhan.
 
-Conversation flow:
-1. Sapaan awal: salam sesuai waktu, kenalkan diri sebagai Aulia dari NusaAI.id, jelaskan singkat InstaGrow + WA Agent, tanya nama & bidang bisnis.
-2. Panggil "Kak [nama]" atau "Kak". JANGAN panggil nama tanpa "Kak".
-3. Discovery ringan: masalah utama, volume chat/leads, target. Satu pertanyaan per balasan.
-4. Jangan bombardir. Maksimal 1-2 pertanyaan per balasan.
+    conversation flow:
+    1. Sapaan awal: salam sesuai waktu, kenalkan diri sebagai Aulia dari NusaAI.id, jelaskan singkat InstaGrow + WA Agent, tanya nama & bidang bisnis.
+    2. JANGAN ulang greeting di balasan berikutnya. Langsung jawab pertanyaan customer.
+    3. Panggil "Kak [nama]" atau "Kak" — JANGAN panggil nama tanpa "Kak".
+    4. Discovery ringan: satu pertanyaan per balasan, jangan bombardir.
+    5. Jika customer tanya tentang produk, JAWAB dulu baru tanya balik.
 
 Pain point mapping:
 - "Bingung posting apa" / "IG sepi" → InstaGrow
@@ -131,6 +132,22 @@ def is_opening_greeting(customer_text: str, history: list[dict]) -> bool:
     return False
 
 
+def has_recent_reply(history: list[dict], seconds: int = 10) -> bool:
+    """Check if Aulia already replied within the last N seconds."""
+    if not history:
+        return False
+    now = datetime.now(timezone.utc)
+    for msg in reversed(history):
+        if msg.get("direction") == "outbound":
+            created = msg.get("created_at")
+            if created:
+                diff = (now - created).total_seconds()
+                if diff < seconds:
+                    return True
+            break
+    return False
+
+
 def opening_reply() -> str:
     now = current_wib_time()
     greeting = time_greeting(now)
@@ -148,24 +165,31 @@ def fallback_reply(customer_text: str, history: list[dict] | None = None) -> str
     history = history or []
     if history:
         text = customer_text.lower()
+        if "instagrow" in text or "instagram" in text or "sosmed" in text or "sosial media" in text:
+            return (
+                "InstaGrow itu layanan kelola sosial media dari NusaAI.id Kak. "
+                "Kami bantu dari setup akun, riset konten, bikin caption & desain, sampai jadwal posting. "
+                "Cocok kalau Kakak mau sosial media lebih aktif dan profesional tapi nggak punya waktu/ngerasa overwhelmed.urang jelasin tentang WA Agent — itu asisten WhatsApp yang bisa auto-reply chat 24/7, jawab FAQ, "
+                "dan bisa bantu kualifikasi lead juga. "
+                "Kakak sekarang pakai WhatsApp buat jualan juga?"
+            )
         if "wa" in text or "whatsapp" in text:
             return (
-                "Bisa Kak. WA Agent dari NusaAI bisa bantu otomatis balas chat, jawab FAQ, "
-                "sampai kualifikasi lead — sesuai kebutuhan bisnis Kakak. "
-                "Yang paling penting tahu dulu: masalah utama bisnis Kakak sekarang apa dan "
-                "berapa banyak chat yang masuk tiap hari?"
+                "WA Agent itu asisten WhatsApp otomatis dari NusaAI.id Kak. "
+                "Bisa auto-reply chat, jawab FAQ, sama bantu kualifikasi lead masuk. "
+                "Ada paket Basic (auto-reply + FAQ) dan Pro (tambah sales discovery + follow-up). "
+                "Kakak sekarang chat WhatsApp seringnya tentang apa — inquiry produk, sama customer lama, atau lainnya?"
             )
         return (
-            "Aku bantu lanjut ya Kak. Dari konteks sebelumnya, "
-            "boleh lanjut ceritain bagian yang paling ingin dibuat otomatis dulu?"
+            "Aku bantu lanjut ya Kak. Boleh ceritakan lebih detail kebutuhan bisnis Kakak sekarang?"
         )
 
+    # No history — opening
     now = current_wib_time()
     greeting = time_greeting(now)
     return (
         f"{greeting} Kak, aku Aulia dari NusaAI.id. "
-        f"Boleh aku tahu nama Kakak dan bisnisnya bergerak di bidang apa? "
-        f"Nanti aku bantu arahkan ke solusi yang paling cocok."
+        f"Boleh kenalan siapa nama Kakak dan bisnisnya bergerak di bidang apa?"
     )
 
 

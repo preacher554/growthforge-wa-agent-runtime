@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.brain import generate_reply
+from app.brain import generate_reply, has_recent_reply
 from app.config import load_settings
 from app.evolution import extract_message
 from app.evolution_client import EvolutionClient
@@ -20,44 +23,136 @@ evolution = EvolutionClient(settings.evolution_base_url, settings.authentication
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
 HUMAN_RESUME_WINDOW = timedelta(hours=1)
+_BUFFER_SECONDS = 4  # wait for multi-bubble messages
+
+# Per-JID message buffer
+_buf: dict[str, list[tuple[str, str, datetime]]] = defaultdict(list)
+_tasks: dict[str, asyncio.Task] = {}
+
+log = logging.getLogger("aulia.runtime")
 
 
 @app.on_event("startup")
 async def startup():
-    # Ensure schema exists (idempotent)
     store.ensure_schema()
-    # Tenant registration is done explicitly during agent spawn,
-    # not auto-registered on every startup.
-    import logging
-    logging.getLogger("aulia.runtime").info("Aulia runtime started — schema ensured, awaiting tenant registration")
+    log.info("Aulia runtime started schema ensured no auto-register")
 
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _mark_incoming_read(incoming) -> None:
-    if not incoming.message_id:
-        return
+async def _send_reply(instance_name: str, remote_jid: str, reply: str) -> None:
     try:
-        await evolution.mark_message_as_read(incoming.instance_name, incoming.remote_jid, incoming.message_id)
-    except Exception as e:
-        import logging
-        logging.getLogger("aulia.runtime").warning("mark_message_as_read failed: %s", e)
+        await evolution.send_text(instance_name, remote_jid, reply)
+    except Exception:
+        log.exception("send_text failed")
 
 
-@app.get("/health")
-def health():
-    return {
-        "ok": True,
-        "service": "aulia-runtime",
-        "instance": settings.evolution_instance,
-        "wa_agents_enabled": settings.wa_agents_enabled,
-    }
+async def _process(jid: str, trigger: object) -> None:
+    await asyncio.sleep(_BUFFER_SECONDS)
+    batch = _buf.pop(jid, [])
+    _tasks.pop(jid, None)
+    if not batch:
+        return
+    combined = " ".join(t for _, t, _ in sorted(batch, key=lambda x: x[2]))
+    first_id = batch[0][0]
+    # rebuild a lightweight incoming-like object
+    payload = trigger.__dict__.copy() if hasattr(trigger, "__dict__") else {}
+    payload["combined_text"] = combined
+    payload["first_id"] = first_id
+    await _handle_incoming(combined, first_id, trigger)
+
+
+async def _handle_incoming(text: str, message_id: str, trigger) -> None:
+    remote_jid = trigger.remote_jid  # type: ignore[attr-defined]
+    instance_name = trigger.instance_name or settings.evolution_instance  # type: ignore[attr-defined]
+
+    tenant = store.get_tenant_by_instance(instance_name)
+    conversation = store.upsert_conversation(
+        tenant["id"], remote_jid, trigger.push_name  # type: ignore[attr-defined]
+    )
+
+    if store.message_exists(conversation["id"], message_id):
+        return
+
+    history = store.get_recent_messages(conversation["id"], limit=8)
+
+    store.insert_message(
+        conversation["id"], message_id, "inbound", remote_jid, text, None
+    )
+
+    # Hand / resume logic
+    state = conversation.get("state")
+    if state in {"waiting_human", "human_active"}:
+        if should_resume_from_admin_command(text):
+            store.set_conversation_state(conversation["id"], "ai_active")
+        elif state == "human_active":
+            last = store.get_last_human_outbound_at(conversation["id"])
+            if last and _now_utc() - last >= HUMAN_RESUME_WINDOW:
+                store.set_conversation_state(conversation["id"], "ai_active")
+            else:
+                return
+        elif state == "waiting_human":
+            last_ho = store.get_last_handoff_at(conversation["id"])
+            if last_ho and _now_utc() - last_ho >= HUMAN_RESUME_WINDOW:
+                store.set_conversation_state(conversation["id"], "ai_active")
+            else:
+                return
+
+    decision = classify_handoff(text)
+    if decision.should_handoff:
+        reply = "Baik Kak, permintaan kamu akan diteruskan ke tim NusaAI. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
+        store.create_handoff(conversation["id"], decision.reason, text)
+        store.set_conversation_state(conversation["id"], "waiting_human")
+        try:
+            notif = build_handoff_notification(
+                customer_text=text,
+                history=history,
+                conversation=conversation,
+                remote_jid=remote_jid,
+                push_name=trigger.push_name,  # type: ignore[attr-defined]
+                reason=decision.reason,
+            )
+            await notifier.send(notif)
+        except Exception:
+            log.exception("handoff notification failed")
+        await _send_reply(instance_name, remote_jid, reply)
+        store.insert_message(
+            conversation["id"],
+            f"handoff-{message_id}",
+            "outbound",
+            None,
+            reply,
+            {"handoff": decision.reason},
+        )
+        return
+
+    # Check if already replied recently (buffer dedup)
+    if has_recent_reply(history, seconds=BUFFER_SECONDS):
+        log.info("Skipping duplicate reply (already responded recently)")
+        return
+
+    reply = generate_reply(
+        text,
+        history,
+        provider=settings.hermes_model_provider,
+        model=settings.hermes_model,
+        timeout=settings.hermes_timeout_seconds,
+    )
+    await _send_reply(instance_name, remote_jid, reply)
+    store.insert_message(
+        conversation["id"],
+        f"reply-{message_id}",
+        "outbound",
+        None,
+        reply,
+        {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
+    )
 
 
 @app.post("/webhook/evolution")
-async def evolution_webhook(request: Request):
+async def webhook(request: Request):
     payload = await request.json()
     event = str(payload.get("event") or "")
     event_l = event.lower()
@@ -71,111 +166,37 @@ async def evolution_webhook(request: Request):
     if not incoming.text.strip() or not incoming.remote_jid.endswith("@s.whatsapp.net"):
         return {"ok": True, "ignored": "not_processable"}
 
-    tenant = store.get_tenant_by_instance(incoming.instance_name or settings.evolution_instance)
-    conversation = store.upsert_conversation(tenant["id"], incoming.remote_jid, incoming.push_name)
+    jid = incoming.remote_jid
+    now = _now_utc()
+    _buf[jid].append((incoming.message_id, incoming.text, now))
 
-    # Dedupe must run before inserting the inbound message. Otherwise every new
-    # message is immediately found again and incorrectly ignored.
-    if store.message_exists(conversation["id"], incoming.message_id):
-        return {"ok": True, "reply": "duplicate_ignored"}
+    # Cancel previous timer for this user
+    if jid in _tasks:
+        _tasks[jid].cancel()
 
-    history = store.get_recent_messages(conversation["id"], limit=8)
+    # Schedule delayed processing
+    _tasks[jid] = asyncio.create_task(_process(jid, incoming))
 
-    if incoming.from_me:
-        store.insert_message(
-            conversation["id"],
-            incoming.message_id or None,
-            "outbound",
-            None,
-            incoming.text,
-            incoming.raw,
-        )
-        if conversation.get("state") in {"waiting_human", "human_active"}:
-            store.set_conversation_state(conversation["id"], "human_active")
-        return {"ok": True, "human_takeover": True}
+    return {"ok": True, "buffered": True}
 
-    store.insert_message(
-        conversation["id"],
-        incoming.message_id or None,
-        "inbound",
-        incoming.remote_jid,
-        incoming.text,
-        incoming.raw,
-    )
 
-    resume_context_note = None
-    if conversation.get("state") in {"waiting_human", "human_active"}:
-        if should_resume_from_admin_command(incoming.text):
-            store.set_conversation_state(conversation["id"], "ai_active")
-        elif conversation.get("state") == "human_active":
-            last_human_at = store.get_last_human_outbound_at(conversation["id"])
-            if last_human_at and _now_utc() - last_human_at >= HUMAN_RESUME_WINDOW:
-                store.set_conversation_state(conversation["id"], "ai_active")
-                resume_context_note = (
-                    "Percakapan ini baru di-resume otomatis setelah admin/human NusaAI mengambil alih. "
-                    "Balas sebagai Aulia/WA Agent yang aktif kembali. Jangan ulang dari awal; lanjutkan natural dari konteks chat. "
-                    "Jika cocok, awali singkat dengan 'Aku Aulia bantu lanjut ya Kak.'"
-                )
-            else:
-                return {"ok": True, "state": conversation.get("state"), "reply": "paused"}
-        elif conversation.get("state") == "waiting_human":
-            last_handoff_at = store.get_last_handoff_at(conversation["id"])
-            if last_handoff_at and _now_utc() - last_handoff_at >= HUMAN_RESUME_WINDOW:
-                store.set_conversation_state(conversation["id"], "ai_active")
-                resume_context_note = (
-                    "Percakapan ini sebelumnya sempat handoff ke human dan sekarang sudah melewati window 1 jam. "
-                    "Balas sebagai Lia yang aktif kembali. Jangan ulang dari awal; lanjutkan natural dari konteks chat."
-                )
-            else:
-                return {"ok": True, "state": conversation.get("state"), "reply": "paused"}
-        else:
-            return {"ok": True, "state": conversation.get("state"), "reply": "paused"}
-
-    decision = classify_handoff(incoming.text)
-    if decision.should_handoff:
-        await _mark_incoming_read(incoming)
-        reply = f"Baik Kak, permintaan kamu akan diteruskan ke tim NusaAI. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
-        store.create_handoff(conversation["id"], decision.reason, incoming.text)
-        store.set_conversation_state(conversation["id"], "waiting_human")
-        try:
-            notification = build_handoff_notification(
-                customer_text=incoming.text,
-                history=history,
-                conversation=conversation,
-                remote_jid=incoming.remote_jid,
-                push_name=incoming.push_name,
-                reason=decision.reason,
-            )
-            await notifier.send(notification)
-        except Exception as e:
-            import logging
-            logging.getLogger("aulia.runtime").error("telegram handoff notification failed: %s", e)
-        try:
-            await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
-            store.insert_message(conversation["id"], f"lia-handoff-{incoming.message_id}", "outbound", None, reply, {"handoff": decision.reason})
-        except Exception as e:
-            import logging
-            logging.getLogger("lia.runtime").error("send_text failed (handoff): %s", e)
-        return {"ok": True, "handoff": True}
-
-    await _mark_incoming_read(incoming)
-    reply = generate_reply(
-        incoming.text,
-        history,
-        provider=settings.hermes_model_provider,
-        model=settings.hermes_model,
-        timeout=settings.hermes_timeout_seconds,
-        context_note=resume_context_note,
-    )
-    try:
-        await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
-        store.insert_message(conversation["id"], f"lia-reply-{incoming.message_id}", "outbound", None, reply, {"provider": settings.hermes_model_provider, "model": settings.hermes_model})
-    except Exception as e:
-        import logging
-        logging.getLogger("lia.runtime").error("send_text failed (reply): %s", e)
-    return {"ok": True, "handoff": False}
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "service": "aulia-runtime",
+        "instance": settings.evolution_instance,
+        "wa_agents_enabled": settings.wa_agents_enabled,
+    }
 
 
 @app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(status_code=500, content={"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]})
+async def on_error(request: Request, exc: Exception):
+    log.exception("unhandled error")
+    return JSONResponse(
+        500, {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]}
+    )
+
+
+# keep refs so GC doesn't collect them
+_BUFFER_SECONDS_REF = _BUFFER_SECONDS
