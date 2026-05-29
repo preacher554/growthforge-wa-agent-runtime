@@ -23,19 +23,18 @@ evolution = EvolutionClient(settings.evolution_base_url, settings.authentication
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
 HUMAN_RESUME_WINDOW = timedelta(hours=1)
-_BUFFER_SECONDS = 4  # wait for multi-bubble messages
+_BUFFER_SECONDS = 4
 
 # Per-JID message buffer
 _buf: dict[str, list[tuple[str, str, datetime]]] = defaultdict(list)
 _tasks: dict[str, asyncio.Task] = {}
-
-log = logging.getLogger("aulia.runtime")
+_log = logging.getLogger("aulia.runtime")
 
 
 @app.on_event("startup")
 async def startup():
     store.ensure_schema()
-    log.info("Aulia runtime started schema ensured no auto-register")
+    _log.info("Aulia runtime started")
 
 
 def _now_utc() -> datetime:
@@ -46,43 +45,44 @@ async def _send_reply(instance_name: str, remote_jid: str, reply: str) -> None:
     try:
         await evolution.send_text(instance_name, remote_jid, reply)
     except Exception:
-        log.exception("send_text failed")
+        _log.exception("send_reply failed")
 
 
-async def _process(jid: str, trigger: object) -> None:
-    await asyncio.sleep(_BUFFER_SECONDS)
-    batch = _buf.pop(jid, [])
-    _tasks.pop(jid, None)
-    if not batch:
-        return
-    combined = " ".join(t for _, t, _ in sorted(batch, key=lambda x: x[2]))
-    first_id = batch[0][0]
-    # rebuild a lightweight incoming-like object
-    payload = trigger.__dict__.copy() if hasattr(trigger, "__dict__") else {}
-    payload["combined_text"] = combined
-    payload["first_id"] = first_id
-    await _handle_incoming(combined, first_id, trigger)
+async def _process_buffer(jid: str, trigger) -> None:
+    """Wait for buffer window then process combined messages."""
+    try:
+        await asyncio.sleep(_BUFFER_SECONDS)
+        batch = _buf.pop(jid, [])
+        _tasks.pop(jid, None)
+        if not batch:
+            return
+        combined = " ".join(t for _, t, _ in sorted(batch, key=lambda x: x[2]))
+        first_id = batch[0][0]
+        _log.info("Processing buffered msg: %s (from %d bubbles)", combined[:80], len(batch))
+        await _handle_incoming(combined, first_id, trigger)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        _log.exception("process_buffer error")
 
 
 async def _handle_incoming(text: str, message_id: str, trigger) -> None:
     remote_jid = trigger.remote_jid  # type: ignore[attr-defined]
     instance_name = trigger.instance_name or settings.evolution_instance  # type: ignore[attr-defined]
+    push_name = trigger.push_name  # type: ignore[attr-defined]
 
     tenant = store.get_tenant_by_instance(instance_name)
-    conversation = store.upsert_conversation(
-        tenant["id"], remote_jid, trigger.push_name  # type: ignore[attr-defined]
-    )
+    conversation = store.upsert_conversation(tenant["id"], remote_jid, push_name)
 
     if store.message_exists(conversation["id"], message_id):
+        _log.info("Duplicate message ignored: %s", message_id)
         return
 
     history = store.get_recent_messages(conversation["id"], limit=8)
 
-    store.insert_message(
-        conversation["id"], message_id, "inbound", remote_jid, text, None
-    )
+    store.insert_message(conversation["id"], message_id, "inbound", remote_jid, text, None)
 
-    # Hand / resume logic
+    # Resume logic
     state = conversation.get("state")
     if state in {"waiting_human", "human_active"}:
         if should_resume_from_admin_command(text):
@@ -107,46 +107,31 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
         store.set_conversation_state(conversation["id"], "waiting_human")
         try:
             notif = build_handoff_notification(
-                customer_text=text,
-                history=history,
-                conversation=conversation,
-                remote_jid=remote_jid,
-                push_name=trigger.push_name,  # type: ignore[attr-defined]
-                reason=decision.reason,
+                customer_text=text, history=history, conversation=conversation,
+                remote_jid=remote_jid, push_name=push_name, reason=decision.reason,
             )
             await notifier.send(notif)
         except Exception:
-            log.exception("handoff notification failed")
+            _log.exception("handoff notification failed")
         await _send_reply(instance_name, remote_jid, reply)
-        store.insert_message(
-            conversation["id"],
-            f"handoff-{message_id}",
-            "outbound",
-            None,
-            reply,
-            {"handoff": decision.reason},
-        )
+        store.insert_message(conversation["id"], "handoff-" + message_id, "outbound", None, reply, {"handoff": decision.reason})
         return
 
-    # Check if already replied recently (buffer dedup)
-    if has_recent_reply(history, seconds=BUFFER_SECONDS):
-        log.info("Skipping duplicate reply (already responded recently)")
+    # Dedup: already replied recently
+    if has_recent_reply(history, seconds=_BUFFER_SECONDS):
+        _log.info("Already replied recently, skipping")
         return
 
     reply = generate_reply(
-        text,
-        history,
+        text, history,
         provider=settings.hermes_model_provider,
         model=settings.hermes_model,
         timeout=settings.hermes_timeout_seconds,
     )
+    _log.info("Reply: %s", reply[:100])
     await _send_reply(instance_name, remote_jid, reply)
     store.insert_message(
-        conversation["id"],
-        f"reply-{message_id}",
-        "outbound",
-        None,
-        reply,
+        conversation["id"], "reply-" + message_id, "outbound", None, reply,
         {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
     )
 
@@ -175,7 +160,7 @@ async def webhook(request: Request):
         _tasks[jid].cancel()
 
     # Schedule delayed processing
-    _tasks[jid] = asyncio.create_task(_process(jid, incoming))
+    _tasks[jid] = asyncio.create_task(_process_buffer(jid, incoming))
 
     return {"ok": True, "buffered": True}
 
@@ -192,11 +177,5 @@ def health():
 
 @app.exception_handler(Exception)
 async def on_error(request: Request, exc: Exception):
-    log.exception("unhandled error")
-    return JSONResponse(
-        500, {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]}
-    )
-
-
-# keep refs so GC doesn't collect them
-_BUFFER_SECONDS_REF = _BUFFER_SECONDS
+    _log.exception("unhandled error")
+    return JSONResponse(500, {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]})
