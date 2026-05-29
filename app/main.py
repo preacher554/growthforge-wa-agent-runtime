@@ -14,7 +14,7 @@ from app.policy import classify_handoff, should_resume_from_admin_command
 from app.store import Store
 
 settings = load_settings()
-app = FastAPI(title="Nusavox Lia Runtime", version="0.1.0")
+app = FastAPI(title="NusaAI Aulia Runtime", version="0.1.0")
 store = Store(settings.database_url)
 evolution = EvolutionClient(settings.evolution_base_url, settings.authentication_api_key)
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
@@ -24,22 +24,12 @@ HUMAN_RESUME_WINDOW = timedelta(hours=1)
 
 @app.on_event("startup")
 async def startup():
-    # Ensure schema exists and tenant is registered in Supabase
-    # This makes the agent immediately visible in the dashboard
+    # Ensure schema exists (idempotent)
     store.ensure_schema()
-    tenant = store.upsert_tenant(
-        tenant_key="growthforge_lia",
-        business_name="Nusavox",
-        package="pro",
-        whatsapp_instance="lia-growthforge",
-        admin_private_jid=settings.admin_private_jid or None,
-    )
+    # Tenant registration is done explicitly during agent spawn,
+    # not auto-registered on every startup.
     import logging
-    logging.getLogger("lia.runtime").info(
-        "Lia runtime started — tenant=%s id=%s dashboard=ready",
-        tenant["tenant_key"],
-        tenant["id"],
-    )
+    logging.getLogger("aulia.runtime").info("Aulia runtime started — schema ensured, awaiting tenant registration")
 
 
 def _now_utc() -> datetime:
@@ -53,14 +43,14 @@ async def _mark_incoming_read(incoming) -> None:
         await evolution.mark_message_as_read(incoming.instance_name, incoming.remote_jid, incoming.message_id)
     except Exception as e:
         import logging
-        logging.getLogger("lia.runtime").warning("mark_message_as_read failed: %s", e)
+        logging.getLogger("aulia.runtime").warning("mark_message_as_read failed: %s", e)
 
 
 @app.get("/health")
 def health():
     return {
         "ok": True,
-        "service": "lia-runtime",
+        "service": "aulia-runtime",
         "instance": settings.evolution_instance,
         "wa_agents_enabled": settings.wa_agents_enabled,
     }
@@ -122,9 +112,9 @@ async def evolution_webhook(request: Request):
             if last_human_at and _now_utc() - last_human_at >= HUMAN_RESUME_WINDOW:
                 store.set_conversation_state(conversation["id"], "ai_active")
                 resume_context_note = (
-                    "Percakapan ini baru di-resume otomatis setelah admin/human Nusavox mengambil alih. "
-                    "Balas sebagai Lia/WA Agent yang aktif kembali. Jangan ulang dari awal; lanjutkan natural dari konteks chat. "
-                    "Jika cocok, awali singkat dengan 'Aku Lia bantu lanjut ya Kak.'"
+                    "Percakapan ini baru di-resume otomatis setelah admin/human NusaAI mengambil alih. "
+                    "Balas sebagai Aulia/WA Agent yang aktif kembali. Jangan ulang dari awal; lanjutkan natural dari konteks chat. "
+                    "Jika cocok, awali singkat dengan 'Aku Aulia bantu lanjut ya Kak.'"
                 )
             else:
                 return {"ok": True, "state": conversation.get("state"), "reply": "paused"}
@@ -144,7 +134,7 @@ async def evolution_webhook(request: Request):
     decision = classify_handoff(incoming.text)
     if decision.should_handoff:
         await _mark_incoming_read(incoming)
-        reply = f"Baik Kak, permintaan kamu akan diteruskan ke tim Nusavox. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
+        reply = f"Baik Kak, permintaan kamu akan diteruskan ke tim NusaAI. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
         store.create_handoff(conversation["id"], decision.reason, incoming.text)
         store.set_conversation_state(conversation["id"], "waiting_human")
         try:
@@ -159,7 +149,7 @@ async def evolution_webhook(request: Request):
             await notifier.send(notification)
         except Exception as e:
             import logging
-            logging.getLogger("lia.runtime").error("telegram handoff notification failed: %s", e)
+            logging.getLogger("aulia.runtime").error("telegram handoff notification failed: %s", e)
         try:
             await evolution.send_text(incoming.instance_name, incoming.remote_jid, reply)
             store.insert_message(conversation["id"], f"lia-handoff-{incoming.message_id}", "outbound", None, reply, {"handoff": decision.reason})

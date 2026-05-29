@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # Evolution API
     authentication_api_key: str = ""
     evolution_base_url: str = "http://127.0.0.1:8080"
-    evolution_instance: str = "lia-growthforge"
+    evolution_instance: str = "aulia-nusaai"
 
     # Runtime
     runtime_host: str = "0.0.0.0"
@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     wa_agents_enabled: bool = False
 
     # AI model
-    hermes_model_provider: str = "openai-codex"
-    hermes_model: str = "gpt-5.2"
+    hermes_model_provider: str = "openrouter"
+    hermes_model: str = "owl-alpha"
     hermes_timeout_seconds: int = 160
 
     model_config = SettingsConfigDict(env_file=(), case_sensitive=False, extra="ignore")
