@@ -86,13 +86,6 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
         _log.info("Duplicate message ignored: %s", message_id)
         return
 
-    # Also check: did we ALREADY send an outbound reply for this conversation recently?
-    # This catches same message_id arriving via different Evolution events
-    history = store.get_recent_messages(conversation["id"], limit=8)
-    if has_recent_reply(history, seconds=_BUFFER_SECONDS):
-        _log.info("Already replied recently (DB check), skipping")
-        return
-
     store.insert_message(conversation["id"], message_id, "inbound", remote_jid, text, None)
 
     # Resume logic
