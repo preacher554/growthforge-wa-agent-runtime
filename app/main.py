@@ -105,12 +105,27 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
         model=settings.hermes_model,
         timeout=settings.hermes_timeout_seconds,
     )
-    _log.info("Reply: %s", reply[:100])
-    await _send_reply(instance_name, remote_jid, reply)
-    store.insert_message(
-        conversation["id"], "reply-" + message_id, "outbound", None, reply,
-        {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
-    )
+
+    # Handle multi-bubble reply (opening) or single reply
+    if isinstance(reply, list):
+        # Multi-bubble: send each bubble separately
+        combined = "\n\n".join(reply)
+        _log.info("Multi-bubble reply: %d bubbles", len(reply))
+        for i, bubble in enumerate(reply):
+            await _send_reply(instance_name, remote_jid, bubble)
+            if i < len(reply) - 1:
+                await asyncio.sleep(0.5)  # small delay between bubbles
+        store.insert_message(
+            conversation["id"], "reply-" + message_id, "outbound", None, combined,
+            {"provider": settings.hermes_model_provider, "model": settings.hermes_model, "bubbles": len(reply)},
+        )
+    else:
+        _log.info("Reply: %s", reply[:100])
+        await _send_reply(instance_name, remote_jid, reply)
+        store.insert_message(
+            conversation["id"], "reply-" + message_id, "outbound", None, reply,
+            {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
+        )
 
 
 @app.post("/webhook/evolution")

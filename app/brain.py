@@ -150,15 +150,16 @@ def has_recent_reply(history: list[dict], seconds: int = 10) -> bool:
     return False
 
 
-def opening_reply() -> str:
+def opening_reply() -> list[str]:
     now = current_wib_time()
     greeting = time_greeting(now)
-    return (
-        f"{greeting} Kak! 😊 Terima kasih sudah menghubungi NusaAI.id.\n\n"
-        f"Aku Aulia, asisten NusaAI.id.\n\n"
-        f"Boleh kenalan siapa nama Kakak dan bisnisnya di bidang apa?\n"
-        f"Nanti aku bantu rekomendasiin solusi yang paling cocok 🙌"
-    )
+    return [
+        f"{greeting} Kak 👋😊",
+        f"Terima kasih sudah menghubungi NusaAI.id.",
+        f"Aku Aulia, asisten virtual dari NusaAI.id 🙌\n\nKami punya solusi AI untuk otomatisasi WhatsApp, customer service, dan pertumbuhan media sosial agar bisnis bisa berjalan lebih efisien.",
+        f"Boleh kenalan dulu, siapa nama Kakak? 😊",
+        f"Sekalian, bisnis Kakak bergerak di bidang apa ya?\n\nNanti aku bantu rekomendasikan solusi yang paling cocok 👍",
+    ]
 
 
 def fallback_reply(customer_text: str, history: list[dict] | None = None) -> str:
