@@ -184,7 +184,7 @@ def fallback_reply(customer_text: str, history: list[dict] | None = None) -> str
             "Aku bantu lanjut ya Kak. Boleh ceritakan lebih detail kebutuhan bisnis Kakak sekarang?"
         )
 
-    # No history — opening
+    # No history —  langsung tanya nama &  bisnis.
     now = current_wib_time()
     greeting = time_greeting(now)
     return (

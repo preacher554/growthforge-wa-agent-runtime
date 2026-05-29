@@ -28,8 +28,9 @@ _BUFFER_SECONDS = 4
 # Per-JID message buffer
 _buf: dict[str, list[tuple[str, str, datetime]]] = defaultdict(list)
 _tasks: dict[str, asyncio.Task] = {}
+# In-memory dedup: track last processed message_id per jid
+_seen_ids: dict[str, str] = {}
 _log = logging.getLogger("aulia.runtime")
-
 
 @app.on_event("startup")
 async def startup():
@@ -152,6 +153,14 @@ async def webhook(request: Request):
         return {"ok": True, "ignored": "not_processable"}
 
     jid = incoming.remote_jid
+    mid = incoming.message_id
+
+    # In-memory dedup: skip if same message_id for this JID
+    if _seen_ids.get(jid) == mid:
+        _log.info("Duplicate webhook event ignored: %s", mid)
+        return {"ok": True, "ignored": "duplicate_event"}
+    _seen_ids[jid] = mid
+
     now = _now_utc()
     _buf[jid].append((incoming.message_id, incoming.text, now))
 
