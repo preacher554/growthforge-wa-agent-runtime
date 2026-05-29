@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
@@ -24,12 +25,15 @@ notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin
 
 HUMAN_RESUME_WINDOW = timedelta(hours=1)
 _BUFFER_SECONDS = 4
+_DEDUP_TTL = 30  # seconds — ignore same content from same JID within this window
 
 # Per-JID message buffer
 _buf: dict[str, list[tuple[str, str, datetime]]] = defaultdict(list)
 _tasks: dict[str, asyncio.Task] = {}
-# In-memory dedup: track last processed message_id per jid
-_seen_ids: dict[str, str] = {}
+# Per-JID lock to prevent parallel processing
+_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+# Content-based dedup: key = hash(jid + text), value = timestamp
+_seen_content: dict[str, datetime] = {}
 _log = logging.getLogger("aulia.runtime")
 
 @app.on_event("startup")
@@ -60,7 +64,10 @@ async def _process_buffer(jid: str, trigger) -> None:
         combined = " ".join(t for _, t, _ in sorted(batch, key=lambda x: x[2]))
         first_id = batch[0][0]
         _log.info("Processing buffered msg: %s (from %d bubbles)", combined[:80], len(batch))
-        await _handle_incoming(combined, first_id, trigger)
+
+        # Per-JID lock: only one processing task per user at a time
+        async with _locks[jid]:
+            await _handle_incoming(combined, first_id, trigger)
     except asyncio.CancelledError:
         pass
     except Exception:
@@ -79,7 +86,12 @@ async def _handle_incoming(text: str, message_id: str, trigger) -> None:
         _log.info("Duplicate message ignored: %s", message_id)
         return
 
+    # Also check: did we ALREADY send an outbound reply for this conversation recently?
+    # This catches same message_id arriving via different Evolution events
     history = store.get_recent_messages(conversation["id"], limit=8)
+    if has_recent_reply(history, seconds=_BUFFER_SECONDS):
+        _log.info("Already replied recently (DB check), skipping")
+        return
 
     store.insert_message(conversation["id"], message_id, "inbound", remote_jid, text, None)
 
@@ -153,16 +165,23 @@ async def webhook(request: Request):
         return {"ok": True, "ignored": "not_processable"}
 
     jid = incoming.remote_jid
-    mid = incoming.message_id
-
-    # In-memory dedup: skip if same message_id for this JID
-    if _seen_ids.get(jid) == mid:
-        _log.info("Duplicate webhook event ignored: %s", mid)
-        return {"ok": True, "ignored": "duplicate_event"}
-    _seen_ids[jid] = mid
-
+    text = incoming.text.strip()
     now = _now_utc()
-    _buf[jid].append((incoming.message_id, incoming.text, now))
+
+    # Content-based dedup: skip if same text from same JID within TTL window
+    content_key = hashlib.md5(f"{jid}:{text}".encode()).hexdigest()
+    last_seen = _seen_content.get(content_key)
+    if last_seen and (now - last_seen).total_seconds() < _DEDUP_TTL:
+        _log.info("Duplicate content ignored: %s (%.0fs ago)", text[:40], (now - last_seen).total_seconds())
+        return {"ok": True, "ignored": "duplicate_content"}
+    _seen_content[content_key] = now
+
+    # Cleanup old dedup entries (prevent memory leak)
+    if len(_seen_content) > 1000:
+        cutoff = now - timedelta(seconds=_DEDUP_TTL * 2)
+        _seen_content = {k: v for k, v in _seen_content.items() if v > cutoff}
+
+    _buf[jid].append((incoming.message_id, text, now))
 
     # Cancel previous timer for this user
     if jid in _tasks:
