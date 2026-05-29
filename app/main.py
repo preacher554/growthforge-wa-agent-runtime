@@ -22,6 +22,26 @@ notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin
 HUMAN_RESUME_WINDOW = timedelta(hours=1)
 
 
+@app.on_event("startup")
+async def startup():
+    # Ensure schema exists and tenant is registered in Supabase
+    # This makes the agent immediately visible in the dashboard
+    store.ensure_schema()
+    tenant = store.upsert_tenant(
+        tenant_key="growthforge_lia",
+        business_name="Nusavox",
+        package="pro",
+        whatsapp_instance="lia-growthforge",
+        admin_private_jid=settings.admin_private_jid or None,
+    )
+    import logging
+    logging.getLogger("lia.runtime").info(
+        "Lia runtime started — tenant=%s id=%s dashboard=ready",
+        tenant["tenant_key"],
+        tenant["id"],
+    )
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 

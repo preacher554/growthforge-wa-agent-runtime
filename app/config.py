@@ -6,28 +6,37 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Supabase dashboard visibility
     supabase_url: str = ""
-    supabase_rest_url: str = ""
+    supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
+
+    # Main database — Supabase PostgreSQL
     database_url: str = ""
 
+    # Evolution API
     authentication_api_key: str = ""
     evolution_base_url: str = "http://127.0.0.1:8080"
     evolution_instance: str = "lia-growthforge"
 
+    # Runtime
     runtime_host: str = "0.0.0.0"
     runtime_port: int = 3300
     admin_private_jid: str = ""
+
+    # Telegram
     telegram_bot_token: str = ""
     telegram_admin_chat_id: str = ""
 
+    # Feature flags
     wa_agents_enabled: bool = False
 
+    # AI model
     hermes_model_provider: str = "openai-codex"
     hermes_model: str = "gpt-5.2"
     hermes_timeout_seconds: int = 160
 
-    model_config = SettingsConfigDict(env_file=(), extra="ignore")
+    model_config = SettingsConfigDict(env_file=(), case_sensitive=False, extra="ignore")
 
 
 def load_dotenv_file(path: str) -> None:
