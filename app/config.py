@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     telegram_admin_chat_id: str = ""
 
     # Feature flags
-    wa_agents_enabled: bool = False
+    wa_agents_enabled: bool = True
 
     # AI model
     hermes_model_provider: str = "openrouter"
