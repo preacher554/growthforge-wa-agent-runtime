@@ -22,7 +22,11 @@ store = Store(settings.database_url)
 evolution = EvolutionClient(settings.evolution_base_url, settings.authentication_api_key)
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
-HUMAN_RESUME_WINDOW = timedelta(hours=1)
+HUMAN_RESUME_WINDOW = timedelta(minutes=10)
+HUMAN_HANDOFF_NOTIFY = (
+    "Baik Kak, aku akan teruskan chat ini ke tim NusaAI.id kami. "
+    "Tim kami aktif pada jam kerja 09.00–17.00 WIB — akan segera menghubungi Kakak ya 🙏"
+)
 _OUTBOUND_LEDGER_TTL = 60  # seconds — remember sent messages for dedup
 
 _log = logging.getLogger("aulia.runtime")
@@ -33,6 +37,10 @@ _seen_ids: dict[str, str] = {}
 # Outbound ledger: track AI-sent messages to detect echo
 # Key: hash(instance + message_id), Value: (text, timestamp)
 _outbound_ledger: dict[str, tuple[str, datetime]] = {}
+
+# In-flight JIDs: JIDs currently being processed by AI reply tasks
+# Any SEND_MESSAGE event from these JIDs during processing = AI echo
+_outbound_pending: set[str] = set()
 
 
 def _now_utc() -> datetime:
@@ -100,9 +108,38 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
             del _outbound_ledger[ledger_key]
             return
 
-        # Not in ledger → human/admin takeover
-        _log.info("Human/admin outbound detected from %s — AI pauses", remote_jid)
+        # Check if this JID is currently being processed (in-flight AI reply)
+        if remote_jid in _outbound_pending:
+            _log.info("Outbound echo from in-flight JID %s — AI is currently replying", remote_jid)
+            return
+
+        # Not in ledger & not in-flight → human/admin takeover
+        _log.info("Human/admin outbound detected from %s — AI pauses & notifies customer", remote_jid)
         store.set_conversation_state(conversation["id"], "human_active")
+        store.create_handoff(
+            conversation["id"],
+            "human_outbound_detected",
+            f"Admin/human mengirim manual dari HP: {text[:200]}",
+        )
+        # Notify customer that chat is being handed to human team
+        try:
+            notif = build_handoff_notification(
+                customer_text=text, history=[], conversation=conversation,
+                remote_jid=remote_jid, push_name=push_name,
+                reason="human_outbound_detected",
+            )
+            await notifier.send(notif)
+        except Exception:
+            _log.exception("human_active notification failed")
+        evo_id = await _send_reply(instance_name, remote_jid, HUMAN_HANDOFF_NOTIFY)
+        store.insert_message(
+            conversation["id"], "human-notify-" + message_id, "outbound", None,
+            HUMAN_HANDOFF_NOTIFY, {"handoff": "human_takeover"},
+        )
+        if evo_id:
+            ledger_key2 = _idempotency_key(instance_name, evo_id)
+            _outbound_ledger[ledger_key2] = (HUMAN_HANDOFF_NOTIFY, _now_utc())
+            _clean_outbound_ledger()
         return
 
     # === INBOUND PROCESSING (from_me=False) ===
@@ -151,42 +188,51 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
         _log.info("Already replied recently, skipping")
         return
 
-    reply = generate_reply(
-        text, history,
-        provider=settings.hermes_model_provider,
-        model=settings.hermes_model,
-        timeout=settings.hermes_timeout_seconds,
-    )
+    # Mark JID as in-flight to prevent SEND_MESSAGE race
+    _outbound_pending.add(remote_jid)
+    try:
+        try:
+            reply = generate_reply(
+                text, history,
+                provider=settings.hermes_model_provider,
+                model=settings.hermes_model,
+                timeout=settings.hermes_timeout_seconds,
+            )
+        except Exception:
+            _log.exception("generate_reply crashed; using fallback reply")
+            reply = fallback_reply(text, history)
 
-    # Handle multi-bubble reply (opening) or single reply
-    if isinstance(reply, list):
-        combined = "\n\n".join(reply)
-        _log.info("Multi-bubble reply: %d bubbles", len(reply))
-        last_evo_id = ""
-        for i, bubble in enumerate(reply):
-            evo_id = await _send_reply(instance_name, remote_jid, bubble)
-            if evo_id:
-                last_evo_id = evo_id
-                ledger_key = _idempotency_key(instance_name, evo_id)
-                _outbound_ledger[ledger_key] = (bubble, _now_utc())
-            if i < len(reply) - 1:
-                await asyncio.sleep(0.5)
-        store.insert_message(
-            conversation["id"], "reply-" + message_id, "outbound", None, combined,
-            {"provider": settings.hermes_model_provider, "model": settings.hermes_model, "bubbles": len(reply)},
-        )
-        _clean_outbound_ledger()
-    else:
-        _log.info("Reply: %s", reply[:100])
-        evo_id = await _send_reply(instance_name, remote_jid, reply)
-        store.insert_message(
-            conversation["id"], "reply-" + message_id, "outbound", None, reply,
-            {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
-        )
-        if evo_id:
-            ledger_key = _idempotency_key(instance_name, evo_id)
-            _outbound_ledger[ledger_key] = (reply, _now_utc())
+        # Handle multi-bubble reply (opening) or single reply
+        if isinstance(reply, list):
+            combined = "\n\n".join(reply)
+            _log.info("Multi-bubble reply: %d bubbles", len(reply))
+            last_evo_id = ""
+            for i, bubble in enumerate(reply):
+                evo_id = await _send_reply(instance_name, remote_jid, bubble)
+                if evo_id:
+                    last_evo_id = evo_id
+                    ledger_key = _idempotency_key(instance_name, evo_id)
+                    _outbound_ledger[ledger_key] = (bubble, _now_utc())
+                if i < len(reply) - 1:
+                    await asyncio.sleep(0.5)
+            store.insert_message(
+                conversation["id"], "reply-" + message_id, "outbound", None, combined,
+                {"provider": settings.hermes_model_provider, "model": settings.hermes_model, "bubbles": len(reply)},
+            )
             _clean_outbound_ledger()
+        else:
+            _log.info("Reply: %s", reply[:100])
+            evo_id = await _send_reply(instance_name, remote_jid, reply)
+            store.insert_message(
+                conversation["id"], "reply-" + message_id, "outbound", None, reply,
+                {"provider": settings.hermes_model_provider, "model": settings.hermes_model},
+            )
+            if evo_id:
+                ledger_key = _idempotency_key(instance_name, evo_id)
+                _outbound_ledger[ledger_key] = (reply, _now_utc())
+                _clean_outbound_ledger()
+    finally:
+        _outbound_pending.discard(remote_jid)
 
 
 @app.post("/webhook/evolution")
