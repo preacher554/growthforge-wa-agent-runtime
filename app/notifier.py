@@ -42,12 +42,13 @@ def build_handoff_notification(
     remote_jid: str,
     push_name: str | None,
     reason: str,
+    agent_name: str = "WA Agent",
 ) -> str:
     name = conversation.get("customer_name") or push_name or "Unknown"
     phone = _phone_from_jid(remote_jid)
     transcript_lines: list[str] = []
     for row in history[-6:]:
-        role = "Customer" if row.get("direction") == "inbound" else "Lia"
+        role = "Customer" if row.get("direction") == "inbound" else agent_name
         text = str(row.get("text") or "").strip().replace("\n", " ")
         if text:
             transcript_lines.append(f"- {role}: {text[:220]}")
@@ -56,13 +57,13 @@ def build_handoff_notification(
 
     transcript = "\n".join(transcript_lines) if transcript_lines else "- Belum ada riwayat singkat."
     return (
-        "Chief, Lia butuh handoff manusia.\n\n"
+        f"Chief, {agent_name} butuh handoff manusia.\n\n"
         f"Nama/customer: {name}\n"
         f"Nomor WA: {phone}\n"
         f"State: waiting_human\n"
         f"Reason: {reason}\n\n"
         "Ringkasan chat terakhir:\n"
         f"{transcript}\n\n"
-        "Aksi yang disarankan: follow-up dari nomor Nusavox yang sama. "
-        "Lia sudah pause auto-reply untuk customer ini."
+        f"Aksi yang disarankan: follow-up dari nomor bisnis yang sama. "
+        f"{agent_name} sudah pause auto-reply untuk customer ini."
     )

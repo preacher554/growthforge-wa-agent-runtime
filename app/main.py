@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request
@@ -17,19 +18,19 @@ from app.policy import classify_handoff, should_resume_from_admin_command
 from app.store import Store
 
 settings = load_settings()
-app = FastAPI(title="NusaAI Aulia Runtime", version="0.1.0")
+app = FastAPI(title="GrowthForge WA Agent Runtime", version="0.1.0")
 store = Store(settings.database_url)
 evolution = EvolutionClient(settings.evolution_base_url, settings.authentication_api_key)
 notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_admin_chat_id)
 
-HUMAN_RESUME_WINDOW = timedelta(minutes=10)
+HUMAN_RESUME_WINDOW = timedelta(hours=1)
 HUMAN_HANDOFF_NOTIFY = (
     "Baik Kak, aku akan teruskan chat ini ke tim NusaAI.id kami. "
     "Tim kami aktif pada jam kerja 09.00–17.00 WIB — akan segera menghubungi Kakak ya 🙏"
 )
 _OUTBOUND_LEDGER_TTL = 60  # seconds — remember sent messages for dedup
 
-_log = logging.getLogger("aulia.runtime")
+_log = logging.getLogger("wa.agent.runtime")
 
 # Idempotency: prevent duplicate webhook processing
 _seen_ids: dict[str, str] = {}
@@ -41,6 +42,13 @@ _outbound_ledger: dict[str, tuple[str, datetime]] = {}
 # In-flight JIDs: JIDs currently being processed by AI reply tasks
 # Any SEND_MESSAGE event from these JIDs during processing = AI echo
 _outbound_pending: set[str] = set()
+
+# Content-based dedup: key = hash(jid + text), value = timestamp
+# Evolution sends different message_id for same content — message_id dedup alone is insufficient
+_seen_content: dict[str, datetime] = {}
+
+# Per-JID lock to prevent parallel processing of the same user's messages
+_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def _now_utc() -> datetime:
@@ -143,6 +151,21 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
         return
 
     # === INBOUND PROCESSING (from_me=False) ===
+    # Content-based dedup: skip if same text from same JID within 30s window
+    content_key = hashlib.md5(f"{remote_jid}:{text}".encode()).hexdigest()
+    last_seen = _seen_content.get(content_key)
+    if last_seen and (_now_utc() - last_seen).total_seconds() < 30:
+        _log.info("Content duplicate ignored: %s (%.0fs ago)", text[:40], (_now_utc() - last_seen).total_seconds())
+        return
+    _seen_content[content_key] = _now_utc()
+
+    # Per-JID lock: only one processing task per user at a time
+    async with _locks[remote_jid]:
+        await _handle_inbound_locked(text, message_id, trigger, conversation, history, tenant, instance_name, remote_jid, push_name, direction)
+
+
+async def _handle_inbound_locked(text, message_id, trigger, conversation, history, tenant, instance_name, remote_jid, push_name, direction):
+    """Core inbound message processing — runs inside per-JID lock."""
     store.insert_message(conversation["id"], message_id, direction, remote_jid, text, None)
 
     # Resume logic
@@ -166,6 +189,7 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
     decision = classify_handoff(text)
     if decision.should_handoff:
         reply = "Baik Kak, permintaan kamu akan diteruskan ke tim NusaAI. Tim kami aktif pada jam kerja 09.00–17.00 WIB, akan segera kami hubungi ya."
+        store.set_conversation_state(conversation["id"], "waiting_human")
         store.create_handoff(conversation["id"], decision.reason, text)
         try:
             notif = build_handoff_notification(
@@ -184,7 +208,7 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
         return
 
     # Dedup: already replied recently
-    if has_recent_reply(history, seconds=10):
+    if has_recent_reply(history, seconds=30):
         _log.info("Already replied recently, skipping")
         return
 
@@ -206,11 +230,9 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
         if isinstance(reply, list):
             combined = "\n\n".join(reply)
             _log.info("Multi-bubble reply: %d bubbles", len(reply))
-            last_evo_id = ""
             for i, bubble in enumerate(reply):
                 evo_id = await _send_reply(instance_name, remote_jid, bubble)
                 if evo_id:
-                    last_evo_id = evo_id
                     ledger_key = _idempotency_key(instance_name, evo_id)
                     _outbound_ledger[ledger_key] = (bubble, _now_utc())
                 if i < len(reply) - 1:
@@ -219,7 +241,6 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
                 conversation["id"], "reply-" + message_id, "outbound", None, combined,
                 {"provider": settings.hermes_model_provider, "model": settings.hermes_model, "bubbles": len(reply)},
             )
-            _clean_outbound_ledger()
         else:
             _log.info("Reply: %s", reply[:100])
             evo_id = await _send_reply(instance_name, remote_jid, reply)
@@ -230,10 +251,9 @@ async def _handle_incoming(text: str, message_id: str, trigger, from_me: bool = 
             if evo_id:
                 ledger_key = _idempotency_key(instance_name, evo_id)
                 _outbound_ledger[ledger_key] = (reply, _now_utc())
-                _clean_outbound_ledger()
+        _clean_outbound_ledger()
     finally:
         _outbound_pending.discard(remote_jid)
-
 
 @app.post("/webhook/evolution")
 async def webhook(request: Request):
@@ -268,7 +288,7 @@ async def webhook(request: Request):
 def health():
     return {
         "ok": True,
-        "service": "aulia-runtime",
+        "service": "wa-agent-runtime",
         "instance": settings.evolution_instance,
         "wa_agents_enabled": settings.wa_agents_enabled,
     }

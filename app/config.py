@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     wa_agents_enabled: bool = True
 
     # AI model
-    hermes_model_provider: str = "openrouter"
-    hermes_model: str = "owl-alpha"
+    hermes_model_provider: str = "openai-codex"
+    hermes_model: str = "gpt-5.3-codex"
     hermes_timeout_seconds: int = 160
 
     model_config = SettingsConfigDict(env_file=(), case_sensitive=False, extra="ignore")
