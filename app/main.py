@@ -70,7 +70,33 @@ def _clean_outbound_ledger():
 @app.on_event("startup")
 async def startup():
     store.ensure_schema()
-    _log.info("Aulia runtime started")
+    _log.info("WA Agent runtime started")
+
+    # Start background heartbeat ping to dashboard
+    asyncio.create_task(_heartbeat_loop())
+
+
+async def _heartbeat_loop():
+    """Send heartbeat to dashboard every 30 seconds."""
+    dashboard_url = "http://43.157.225.184:3200/api/wa-agents?action=heartbeat"
+    instance_name = settings.evolution_instance
+
+    # Wait a few seconds for app to fully start
+    await asyncio.sleep(5)
+
+    while True:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.post(dashboard_url, json={"instance": instance_name}) as resp:
+                    if resp.status == 200:
+                        _log.debug("Heartbeat sent to dashboard")
+                    else:
+                        _log.warning("Heartbeat failed: %d", resp.status)
+        except Exception as e:
+            _log.debug("Heartbeat error: %s", str(e)[:100])
+
+        await asyncio.sleep(30)
 
 
 async def _send_reply(instance_name: str, remote_jid: str, text: str) -> str:
